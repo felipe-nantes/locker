@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ChargeShield Hub — Painel do Operador</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><text y='19' font-size='19'>🔒</text></svg>" />
+</head>
+<body>
+  <div class="wrap">
+
+    <!-- Topbar -->
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            <path d="M13 8l-3 4h4l-3 4"/>
+          </svg>
+        </div>
+        <div>
+          <h1>ChargeShield Hub — Demonstração de Controle de Acesso</h1>
+          <p>Simulação de autenticação por QR Code para liberação segura de hub modular de carregador elétrico.</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span id="conn-chip" class="chip offline"><span class="dot"></span><span id="conn-text">Conectando…</span></span>
+        <button id="btn-reset-all" class="btn danger" title="Voltar todos os hubs para Fechadura bloqueada">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+          Resetar demonstração
+        </button>
+      </div>
+    </header>
+
+    <!-- Hubs -->
+    <h2 class="section-title">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M6 7V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v2"/></svg>
+      Hubs monitorados
+    </h2>
+    <div id="hubs" class="grid hubs-grid">
+      <div class="empty-note">Carregando hubs…</div>
+    </div>
+
+    <!-- Solicitações + eventos -->
+    <div class="grid bottom-grid">
+      <section class="card card-pad">
+        <h2 class="section-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          Solicitações recentes
+        </h2>
+        <div id="requests" class="list">
+          <div class="empty-note">Nenhuma solicitação recebida ainda.</div>
+        </div>
+      </section>
+
+      <section class="card card-pad">
+        <h2 class="section-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Histórico de eventos
+        </h2>
+        <div id="events" class="timeline">
+          <div class="empty-note">Nenhum evento registrado.</div>
+        </div>
+      </section>
+    </div>
+
+    <p class="footer-note">
+      Protótipo demonstrativo — a liberação da fechadura é simulada. A função <code>unlockHub(hubId, sessionId)</code>
+      está isolada para futura integração com controladora IoT (ESP32 / relé / MQTT).
+    </p>
+  </div>
+
+  <!-- Lightbox do QR Code (clique no QR amplia; clique fora ou ESC fecha) -->
+  <div id="qr-lightbox" class="qr-lightbox" aria-hidden="true">
+    <div class="qr-lightbox-card" role="dialog" aria-label="QR Code ampliado">
+      <button class="qr-lightbox-close" id="qr-lightbox-close" aria-label="Fechar">&times;</button>
+      <img id="qr-lightbox-img" alt="QR Code ampliado" />
+      <div class="qr-lightbox-caption">
+        <div class="qr-lightbox-hub" id="qr-lightbox-hub"></div>
+        <div class="qr-lightbox-url" id="qr-lightbox-url"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/dashboard.js"></script>
+</body>
+</html>

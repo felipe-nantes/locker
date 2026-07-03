@@ -1,0 +1,24 @@
+# Dependências
+node_modules/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
+*.log
+
+# Variáveis de ambiente
+.env
+.env.*
+
+# Arquivos de sistema operacional
+.DS_Store
+Thumbs.db
+
+# Ferramentas de editor / IDE
+.vscode/
+.idea/
+
+# Configuração local do Claude Code (preview)
+.claude/
