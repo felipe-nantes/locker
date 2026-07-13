@@ -1,5 +1,5 @@
 /**
- * ChargeShield Hub — página mobile (aberta ao escanear o QR Code).
+ * Nexlock — página mobile (aberta ao escanear o QR Code).
  * Identifica o hub pela URL (/access/:hubId), registra o scan,
  * valida o formulário e envia as credenciais para o servidor.
  */

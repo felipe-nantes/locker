@@ -1,12 +1,13 @@
 /**
- * ChargeShield Hub — servidor da demonstração.
+ * Nexlock — servidor da demonstração.
  * -------------------------------------------------------------
  * Um único processo Node/Express que serve:
+ *   • /                 → página de apresentação (pitch da solução)
  *   • /dashboard        → painel do operador (PC)
  *   • /access/:hubId    → página mobile (celular, aberta pelo QR Code)
  *   • /events           → stream SSE (tempo real para o dashboard)
  *   • /qr/:hubId.png    → imagem do QR Code (aponta para o IP local)
- *   • /api/*            → API REST (estado, acesso, reset)
+ *   • /api/*            → API REST (estado, acesso, alertas, reset)
  *
  * Roda em toda a rede local (0.0.0.0), então o celular acessa pelo IP do PC.
  */
@@ -51,7 +52,9 @@ function baseUrl() {
 // ---------------------------------------------------------------------------
 // Páginas
 // ---------------------------------------------------------------------------
-app.get('/', (_req, res) => res.redirect('/dashboard'));
+app.get('/', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 app.get('/dashboard', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
@@ -88,7 +91,7 @@ app.get('/qr/:hubId.png', async (req, res) => {
       type: 'png',
       width: 480,
       margin: 2,
-      color: { dark: '#0b1220', light: '#ffffff' },
+      color: { dark: '#0a100c', light: '#fdfdf9' },
     });
     res.set('Content-Type', 'image/png');
     res.set('Cache-Control', 'no-store');
@@ -129,6 +132,20 @@ app.post('/api/hubs/:hubId/access', (req, res) => {
   });
 
   res.json({ ok: true, hubId: hub.id, session: result.session });
+});
+
+// Simula uma tentativa de violação detectada pelos sensores (tamper/vibração).
+app.post('/api/hubs/:hubId/tamper', (req, res) => {
+  const alert = store.triggerTamper(req.params.hubId);
+  if (!alert) return res.status(404).json({ error: 'Hub não encontrado' });
+  res.json({ ok: true, alert });
+});
+
+// Operador marca um alerta como verificado/resolvido.
+app.post('/api/alerts/:alertId/resolve', (req, res) => {
+  const alert = store.resolveAlert(req.params.alertId);
+  if (!alert) return res.status(404).json({ error: 'Alerta não encontrado' });
+  res.json({ ok: true, alert });
 });
 
 app.post('/api/hubs/:hubId/reset', (req, res) => {
@@ -172,8 +189,9 @@ app.get('/events', (req, res) => {
 // ---------------------------------------------------------------------------
 app.listen(PORT, '0.0.0.0', () => {
   const ip = getLanIp();
-  console.log('\n  ChargeShield Hub — demonstração no ar');
+  console.log('\n  Nexlock — demonstração no ar');
   console.log('  ---------------------------------------------');
+  console.log(`  Apresentação (PC):  http://localhost:${PORT}/`);
   console.log(`  Dashboard (PC):     http://localhost:${PORT}/dashboard`);
   console.log(`  Dashboard (rede):   http://${ip}:${PORT}/dashboard`);
   console.log(`  Mobile (exemplo):   http://${ip}:${PORT}/access/HUB-001`);

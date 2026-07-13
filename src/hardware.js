@@ -10,7 +10,7 @@
  *   import mqtt from 'mqtt';
  *   const client = mqtt.connect('mqtt://192.168.0.50:1883');
  *   export function unlockHub(hubId, sessionId) {
- *     client.publish(`chargeshield/${hubId}/lock`,
+ *     client.publish(`nexlock/${hubId}/lock`,
  *       JSON.stringify({ cmd: 'unlock', sessionId }));
  *   }
  *

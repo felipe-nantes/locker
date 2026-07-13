@@ -1,13 +1,22 @@
-# ChargeShield Hub — Demonstração de Controle de Acesso
+# Nexlock — Hub Modular Inteligente para Proteção de Carregadores Elétricos
 
-Protótipo demonstrativo de autenticação por **QR Code** para liberação segura de um
-hub modular de proteção de carregadores de veículos elétricos.
+Protótipo demonstrativo (V0) da camada **física + digital** de segurança para eletropostos:
+autenticação por **QR Code**, envio de credenciais pelo celular, **dashboard em tempo real**,
+**alertas de violação** e simulação da liberação da fechadura eletromecânica.
 
-O PC roda o painel do operador; o celular escaneia o QR Code, preenche as credenciais
-e o dashboard mostra a liberação da fechadura **em tempo real** (simulação visual —
-sem hardware nesta fase).
+O PC roda a apresentação e o painel do operador; o celular escaneia o QR Code, preenche as
+credenciais e o dashboard mostra o **ciclo completo de acesso** — da liberação até o
+re-bloqueio automático — sem hardware nesta fase.
 
 ---
+
+## Páginas da demo
+
+| URL | O que é |
+| --- | --- |
+| `/` | Página de apresentação (pitch): problema, solução, como funciona, modelo de negócio e roadmap |
+| `/dashboard` | Painel do operador: KPIs, hubs, alertas de segurança, solicitações e histórico de eventos |
+| `/access/HUB-001` | Página mobile aberta pelo QR Code (formulário de credenciais) |
 
 ## Requisitos
 
@@ -24,8 +33,9 @@ npm start
 O terminal mostra algo assim:
 
 ```
-  ChargeShield Hub — demonstração no ar
+  Nexlock — demonstração no ar
   ---------------------------------------------
+  Apresentação (PC):  http://localhost:3000/
   Dashboard (PC):     http://localhost:3000/dashboard
   Dashboard (rede):   http://192.168.0.10:3000/dashboard
   Mobile (exemplo):   http://192.168.0.10:3000/access/HUB-001
@@ -33,11 +43,19 @@ O terminal mostra algo assim:
   IP local detectado: 192.168.0.10
 ```
 
-1. Abra o **dashboard** no PC: `http://localhost:3000/dashboard`
-2. Escaneie o **QR Code** de um hub com a câmera do celular
-3. Preencha nome, telefone e placa, aceite os termos e toque em **Solicitar acesso**
-4. Veja o dashboard mudar em tempo real: *Fechadura liberada → Porta aberta → Sessão ativa*
-5. Use **Resetar demonstração** para repetir o fluxo
+## Roteiro sugerido para a apresentação
+
+1. **Abra `http://localhost:3000/`** — apresente o problema e a proposta de valor com a página de pitch.
+2. Clique em **"Ver demonstração ao vivo"** → abre o painel do operador.
+3. Mostre os **KPIs** (hubs monitorados, online, acessos, alertas) e os 3 hubs em locais diferentes.
+4. **Escaneie o QR Code** do HUB-001 com o celular (clique no QR para ampliar).
+5. No celular: preencha **nome, telefone e placa**, aceite os termos e toque em **Solicitar acesso**.
+6. No dashboard, acompanhe em tempo real o **ciclo completo**:
+   *Acesso autorizado → Fechadura liberada → Porta aberta → Sessão ativa → Porta fechada → Fechadura bloqueada (re-bloqueio automático)*.
+7. Mostre a **rastreabilidade**: a solicitação com os dados do usuário e o histórico de eventos.
+8. Clique em **"Simular violação"** em um hub → alerta vermelho pulsante, KPI de alertas sobe,
+   evento registrado. Clique em **"Resolver"** no painel de alertas para encerrar.
+9. Feche com o **roadmap** na página de apresentação (V0 hoje → V1 bancada → ... → V4 comercial).
 
 ## Como descobrir o IP local do PC
 
@@ -75,10 +93,12 @@ Para trocar a porta: `$env:PORT = "8080"; npm start`
 tranca_tudo/
 ├── server.js            # Servidor Express: rotas, SSE, QR Code, detecção de IP
 ├── src/
-│   ├── state.js         # Estado em memória + máquina de estados da fechadura
+│   ├── state.js         # Estado em memória + máquina de estados + alertas
 │   └── hardware.js      # Camada de abstração de hardware (unlockHub/lockHub)
 ├── public/
-│   ├── styles.css       # Design system (dark, segurança/IoT)
+│   ├── styles.css       # Design system "Vault Glass" (glassmorphism, verde-carvão + latão)
+│   ├── fonts/           # Fontes locais (woff2) — a demo funciona 100% offline
+│   ├── index.html       # Página de apresentação (pitch)
 │   ├── dashboard.html   # Painel do operador (PC)
 │   ├── dashboard.js
 │   ├── mobile.html      # Página aberta pelo QR Code (celular)
@@ -97,8 +117,9 @@ Celular escaneia QR ──▶ /access/HUB-001 ──▶ formulário de credencia
         └────────────▶  SSE /events  ◀─────────────┘
                              │
                              ▼
-      Dashboard: Bloqueada → Acesso autorizado → Fechadura liberada
-                 → (3s) Porta aberta → (4s) Sessão de acesso ativa
+   Dashboard: Bloqueada → Acesso autorizado → Fechadura liberada
+              → (3s) Porta aberta → (4s) Sessão ativa
+              → (9s) Porta fechada → (2,5s) Fechadura bloqueada (auto)
 ```
 
 ## Segurança conceitual simulada
@@ -106,6 +127,8 @@ Celular escaneia QR ──▶ /access/HUB-001 ──▶ formulário de credencia
 - Cada QR Code pertence a um hub específico (`/access/:hubId`)
 - Cada solicitação gera uma **sessão de acesso** com UUID, data e hora
 - A fechadura **só** libera após envio de credenciais válidas
+- Ao final do ciclo, a fechadura **re-bloqueia automaticamente** (fail-secure conceitual)
+- Sensores simulados de **tamper/vibração** geram alertas que exigem ação do operador
 - Validação no **cliente e no servidor**: nome, telefone, placa e aceite dos termos são obrigatórios
 - Todos os eventos ficam registrados no histórico do dashboard
 
@@ -119,8 +142,8 @@ unlockHub(hubId, sessionId)
 
 Hoje ela apenas registra o comando; no futuro, **somente esse arquivo** precisa mudar
 para enviar o comando a uma controladora IoT real (ESP32 + relé + fechadura
-eletromecânica), por exemplo via MQTT:
+eletromecânica fail-secure), por exemplo via MQTT:
 
 ```js
-client.publish(`chargeshield/${hubId}/lock`, JSON.stringify({ cmd: 'unlock', sessionId }));
+client.publish(`nexlock/${hubId}/lock`, JSON.stringify({ cmd: 'unlock', sessionId }));
 ```

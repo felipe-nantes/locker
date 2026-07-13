@@ -1,7 +1,7 @@
 {
-  "name": "chargeshield-hub",
+  "name": "nexlock",
   "version": "1.0.0",
-  "description": "ChargeShield Hub — Demonstração de controle de acesso por QR Code para hub modular de carregador elétrico.",
+  "description": "Nexlock — Protótipo de hub modular inteligente para proteção de carregadores elétricos, com autenticação por QR Code, envio de credenciais via celular, dashboard em tempo real e simulação de liberação de fechadura para controle seguro de acesso.",
   "type": "module",
   "main": "server.js",
   "scripts": {

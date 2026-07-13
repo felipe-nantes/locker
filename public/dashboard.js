@@ -1,13 +1,20 @@
 /**
- * ChargeShield Hub — painel do operador.
+ * Nexlock — painel do operador.
  * Conecta ao stream SSE (/events) e re-renderiza os cards a cada mudança.
  */
 (() => {
   const $hubs = document.getElementById('hubs');
   const $requests = document.getElementById('requests');
   const $events = document.getElementById('events');
+  const $alerts = document.getElementById('alerts');
   const $connChip = document.getElementById('conn-chip');
   const $connText = document.getElementById('conn-text');
+
+  const $kpiHubs = document.getElementById('kpi-hubs');
+  const $kpiOnline = document.getElementById('kpi-online');
+  const $kpiAccesses = document.getElementById('kpi-accesses');
+  const $kpiAlerts = document.getElementById('kpi-alerts');
+  const $kpiAlertsCard = document.getElementById('kpi-alerts-card');
 
   let baseUrl = window.location.origin; // trocado pelo IP local via /api/config
 
@@ -28,6 +35,8 @@
     qr: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM21 14v.01M14 21v.01M21 21v.01M17.5 17.5h3.5v3.5"/></svg>',
     check: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
     reset: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>',
+    alert: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z"/><path d="M12 9v4M12 17h.01"/></svg>',
+    shield: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
   };
 
   const eventIcons = {
@@ -37,6 +46,9 @@
     unlocked: icons.lockOpen,
     door: icons.door,
     session: icons.bolt,
+    relocked: icons.lockClosed,
+    tamper: icons.alert,
+    resolved: icons.shield,
     reset: icons.reset,
   };
 
@@ -54,6 +66,7 @@
   };
 
   const statusClass = (hub) => {
+    if (hub.tamper) return 'status-tamper';
     if (hub.session === 'active') return 'status-session';
     if (hub.door === 'open') return 'status-door';
     if (hub.lock === 'unlocked') return 'status-unlocked';
@@ -62,6 +75,7 @@
   };
 
   const statusIcon = (hub) => {
+    if (hub.tamper) return icons.alert;
     if (hub.session === 'active') return icons.bolt;
     if (hub.door === 'open') return icons.door;
     if (hub.lock === 'unlocked') return icons.lockOpen;
@@ -92,8 +106,14 @@
          </div>`
       : '';
 
+    const lockText = hub.tamper
+      ? { t1: 'Tentativa de violação detectada', t2: 'Sensores tamper/vibração dispararam — verificar local' }
+      : unlocked
+        ? { t1: 'Fechadura liberada', t2: 'Comando unlockHub() executado — acesso em andamento' }
+        : { t1: 'Fechadura bloqueada', t2: 'Aguardando autenticação por QR Code' };
+
     return `
-      <article class="card hub" data-hub="${esc(hub.id)}">
+      <article class="card hub ${hub.tamper ? 'hub-tamper' : ''}" data-hub="${esc(hub.id)}">
         <div class="hub-head">
           <div>
             <div class="hub-id">${esc(hub.id)}</div>
@@ -114,7 +134,7 @@
           <span class="chip">${icons.bolt}&nbsp;Sessão: <b>&nbsp;${hub.session === 'active' ? 'Ativa' : '—'}</b></span>
         </div>
 
-        <div class="lockviz ${unlocked ? 'unlocked' : 'locked'}">
+        <div class="lockviz ${hub.tamper ? 'tamper' : unlocked ? 'unlocked' : 'locked'}">
           <svg class="padlock" viewBox="0 0 64 64" fill="none">
             <path class="shackle" d="M20 30 V20 a12 12 0 0 1 24 0 v10" stroke-width="5" stroke-linecap="round"/>
             <rect class="body" x="14" y="30" width="36" height="26" rx="6" stroke-width="4"/>
@@ -122,8 +142,8 @@
             <path d="M32 44 v5" stroke="currentColor" stroke-width="3" stroke-linecap="round" opacity="0.85"/>
           </svg>
           <div class="lock-text">
-            <div class="t1">${unlocked ? 'Fechadura liberada' : 'Fechadura bloqueada'}</div>
-            <div class="t2">${unlocked ? 'Comando unlockHub() executado — acesso em andamento' : 'Aguardando autenticação por QR Code'}</div>
+            <div class="t1">${lockText.t1}</div>
+            <div class="t2">${lockText.t2}</div>
           </div>
         </div>
 
@@ -140,9 +160,36 @@
         </div>
 
         <div class="hub-actions">
-          <button class="btn ghost block btn-reset-hub" data-hub="${esc(hub.id)}">${icons.reset}&nbsp;Resetar ${esc(hub.id)}</button>
+          <button class="btn ghost btn-tamper" data-hub="${esc(hub.id)}" title="Simula os sensores detectando uma tentativa de violação">${icons.alert}&nbsp;Simular violação</button>
+          <button class="btn ghost btn-reset-hub" data-hub="${esc(hub.id)}">${icons.reset}&nbsp;Resetar</button>
         </div>
       </article>`;
+  }
+
+  function renderAlerts(alerts) {
+    if (!alerts.length) {
+      $alerts.innerHTML = '<div class="empty-note">Nenhum alerta de segurança.</div>';
+      return;
+    }
+    $alerts.innerHTML = alerts
+      .map(
+        (a) => `
+        <div class="alert-item ${a.resolved ? 'resolved' : 'active'}">
+          <div class="avatar">${a.resolved ? icons.shield : icons.alert}</div>
+          <div class="info">
+            <div class="name">${a.resolved ? 'Violação verificada' : 'Tentativa de violação'}</div>
+            <div class="sub">
+              <span class="tag">${esc(a.hubId)}</span>
+              <span>${fmtTime(a.at)}</span>
+              ${a.resolved ? `<span>resolvido às ${fmtTime(a.resolvedAt)}</span>` : ''}
+            </div>
+          </div>
+          ${a.resolved
+            ? `<span class="chip online">${icons.check}&nbsp;Resolvido</span>`
+            : `<button class="btn danger btn-resolve" data-alert="${esc(a.id)}">Resolver</button>`}
+        </div>`
+      )
+      .join('');
   }
 
   function renderRequests(requests) {
@@ -188,8 +235,19 @@
       .join('');
   }
 
+  function renderKpis(stats) {
+    if (!stats) return;
+    $kpiHubs.textContent = stats.hubsTotal;
+    $kpiOnline.textContent = stats.hubsOnline;
+    $kpiAccesses.textContent = stats.totalAccesses;
+    $kpiAlerts.textContent = stats.activeAlerts;
+    $kpiAlertsCard.classList.toggle('kpi-alarm', stats.activeAlerts > 0);
+  }
+
   function render(state) {
+    renderKpis(state.stats);
     $hubs.innerHTML = state.hubs.map(renderHub).join('');
+    renderAlerts(state.alerts || []);
     renderRequests(state.requests);
     renderEvents(state.events);
   }
@@ -202,13 +260,23 @@
   });
 
   $hubs.addEventListener('click', (e) => {
-    const btn = e.target.closest('.btn-reset-hub');
-    if (btn) {
-      fetch(`/api/hubs/${btn.dataset.hub}/reset`, { method: 'POST' });
+    const reset = e.target.closest('.btn-reset-hub');
+    if (reset) {
+      fetch(`/api/hubs/${reset.dataset.hub}/reset`, { method: 'POST' });
+      return;
+    }
+    const tamper = e.target.closest('.btn-tamper');
+    if (tamper) {
+      fetch(`/api/hubs/${tamper.dataset.hub}/tamper`, { method: 'POST' });
       return;
     }
     const qr = e.target.closest('.qr-img');
     if (qr) openLightbox(qr.closest('article.hub')?.dataset.hub);
+  });
+
+  $alerts.addEventListener('click', (e) => {
+    const btn = e.target.closest('.btn-resolve');
+    if (btn) fetch(`/api/alerts/${btn.dataset.alert}/resolve`, { method: 'POST' });
   });
 
   // ---------------------------------------------------------------------
