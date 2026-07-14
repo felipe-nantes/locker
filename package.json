@@ -12,7 +12,9 @@
     "node": ">=18"
   },
   "dependencies": {
+    "dotenv": "^17.4.2",
     "express": "^4.19.2",
+    "mqtt": "^5.15.2",
     "qrcode": "^1.5.4"
   }
 }
