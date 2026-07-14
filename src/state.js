@@ -1,88 +1,190 @@
-/**
- * Estado da demonstração (em memória) + máquina de estados da fechadura.
- * -------------------------------------------------------------
- * Mantém a lista de hubs, o histórico de eventos, as solicitações recebidas
- * e os alertas de segurança. Qualquer mudança emite o evento "change" no
- * `bus`, que o servidor usa para empurrar o estado para os dashboards
- * conectados via SSE (tempo real).
- */
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { unlockHub, lockHub } from './hardware.js';
+import {
+  isHardwareConnected,
+  lockHub,
+  requestStatus,
+  unlockHub,
+} from './hardware.js';
 
-/** Barramento de eventos: emite "change" com o estado público a cada alteração. */
 export const bus = new EventEmitter();
 
-/** Tempos (ms) da simulação do ciclo de acesso. Ajustáveis para a demo. */
-const DELAY_DOOR_OPEN = 3000; // após liberar a fechadura → "Porta aberta"
-const DELAY_SESSION = 4000; // após abrir a porta → "Sessão ativa"
-const DELAY_DOOR_CLOSE = 9000; // após sessão ativa → "Porta fechada"
-const DELAY_RELOCK = 2500; // após fechar a porta → re-bloqueio automático
-
-/** Definição dos hubs disponíveis na demonstração. */
 const HUB_DEFS = [
   { id: 'HUB-001', name: 'Carregador Protegido', location: 'Posto Demonstração' },
   { id: 'HUB-002', name: 'Carregador Protegido', location: 'Estacionamento Central' },
   { id: 'HUB-003', name: 'Carregador Protegido', location: 'Rodovia BR-101 km 42' },
 ];
 
-/** Mapa hubId -> estado do hub. */
 const hubs = new Map();
-for (const def of HUB_DEFS) hubs.set(def.id, freshHub(def));
+for (const definition of HUB_DEFS) {
+  hubs.set(definition.id, freshHub(definition));
+}
 
-/** Histórico global de eventos (mais recentes primeiro). */
 let events = [];
-/** Solicitações de acesso recebidas (mais recentes primeiro). */
 let requests = [];
-/** Alertas de segurança (mais recentes primeiro). */
 let alerts = [];
-/** Contador de acessos autorizados desde o início da demo. */
 let totalAccesses = 0;
 
-function freshHub(def) {
+const countedSessions = new Set();
+
+// Evita que quedas muito curtas do Wokwi façam o dashboard piscar offline.
+// Pode ser configurado no .env: HUB_OFFLINE_GRACE_MS=15000
+const HUB_OFFLINE_GRACE_MS = Math.max(
+  0,
+  Number(process.env.HUB_OFFLINE_GRACE_MS || 15000),
+);
+const offlineTimers = new Map();
+
+function freshHub(definition) {
   return {
-    id: def.id,
-    name: def.name,
-    location: def.location,
-    online: true,
-    lock: 'locked', // 'locked' | 'unlocked'
-    door: 'closed', // 'closed' | 'open'
-    session: 'idle', // 'idle' | 'active'
-    tamper: false, // alerta de violação ativo?
-    statusLabel: 'Fechadura bloqueada',
-    currentSession: null, // { id, name, phone, plate, email, requestedAt }
+    id: definition.id,
+    name: definition.name,
+    location: definition.location,
+    online: false,
+    lock: 'locked',
+    door: 'closed',
+    session: 'idle',
+    tamper: false,
+    vibration: false,
+    statusLabel: 'Hub offline',
+    currentSession: null,
     lastRequestAt: null,
-    _timers: [], // timers internos (não expostos)
+    lastSeenAt: null,
   };
 }
 
 function addEvent(hubId, type, message) {
-  const ev = {
+  const event = {
     id: randomUUID(),
     hubId,
     type,
     message,
     at: new Date().toISOString(),
   };
-  events.unshift(ev);
+
+  events.unshift(event);
   if (events.length > 120) events.length = 120;
-  return ev;
+  return event;
 }
 
-function clearTimers(hub) {
-  for (const t of hub._timers) clearTimeout(t);
-  hub._timers = [];
+function emitChange() {
+  bus.emit('change', getState());
 }
 
-/** Remove campos internos antes de enviar ao cliente. */
 function publicHub(hub) {
-  const { _timers, ...rest } = hub;
-  return rest;
+  return { ...hub };
 }
 
-/** Estado público completo (o que os clientes recebem). */
+function hasActiveSecurityAlert(hubId) {
+  return alerts.some((alert) => alert.hubId === hubId && !alert.resolved);
+}
+
+function refreshStatusLabel(hub) {
+  if (!hub.online) {
+    hub.statusLabel = 'Hub offline';
+    return;
+  }
+
+  if (hub.tamper || hasActiveSecurityAlert(hub.id)) {
+    hub.statusLabel = 'ALERTA: tentativa de violação';
+    return;
+  }
+
+  if (hub.door === 'open') {
+    hub.statusLabel = 'Sessão de acesso ativa';
+    return;
+  }
+
+  if (hub.lock === 'unlocked') {
+    hub.statusLabel = 'Fechadura liberada';
+    return;
+  }
+
+  if (hub.currentSession) {
+    hub.statusLabel = 'Aguardando confirmação do hub';
+    return;
+  }
+
+  hub.statusLabel = 'Fechadura bloqueada';
+}
+
+function createSecurityAlert(hub, type, message) {
+  const duplicate = alerts.find(
+    (alert) => alert.hubId === hub.id && alert.type === type && !alert.resolved,
+  );
+
+  if (duplicate) return duplicate;
+
+  const alert = {
+    id: randomUUID(),
+    hubId: hub.id,
+    type,
+    message,
+    at: new Date().toISOString(),
+    resolved: false,
+    resolvedAt: null,
+  };
+
+  alerts.unshift(alert);
+  if (alerts.length > 50) alerts.length = 50;
+  return alert;
+}
+
+function cancelOfflineTimer(hubId) {
+  const timer = offlineTimers.get(hubId);
+  if (!timer) return;
+
+  clearTimeout(timer);
+  offlineTimers.delete(hubId);
+}
+
+function scheduleOffline(hub) {
+  cancelOfflineTimer(hub.id);
+
+  console.warn(
+    `[STATE] ${hub.id} sinalizou offline; aguardando ${HUB_OFFLINE_GRACE_MS} ms antes de atualizar o dashboard`,
+  );
+
+  const timer = setTimeout(() => {
+    offlineTimers.delete(hub.id);
+
+    if (!hub.online) return;
+
+    hub.online = false;
+    addEvent(hub.id, 'offline', `${hub.id} desconectado`);
+    refreshStatusLabel(hub);
+    emitChange();
+  }, HUB_OFFLINE_GRACE_MS);
+
+  offlineTimers.set(hub.id, timer);
+}
+
+function normalizeBoolean(value, fallback) {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
+function applyStateSnapshot(hub, data) {
+  if (data.lock === 'locked' || data.lock === 'unlocked') {
+    hub.lock = data.lock;
+  }
+
+  if (data.door === 'closed' || data.door === 'open') {
+    hub.door = data.door;
+  }
+
+  hub.tamper = normalizeBoolean(data.tamper, hub.tamper);
+  hub.vibration = normalizeBoolean(data.vibration, hub.vibration);
+
+  if (hub.door === 'open') {
+    hub.session = 'active';
+  } else if (hub.lock === 'locked') {
+    hub.session = 'idle';
+  }
+}
+
 export function getState() {
   const hubList = [...hubs.values()];
+
   return {
     hubs: hubList.map(publicHub),
     events: events.slice(0, 50),
@@ -90,217 +192,358 @@ export function getState() {
     alerts: alerts.slice(0, 20),
     stats: {
       hubsTotal: hubList.length,
-      hubsOnline: hubList.filter((h) => h.online).length,
+      hubsOnline: hubList.filter((hub) => hub.online).length,
       totalAccesses,
-      activeAlerts: alerts.filter((a) => !a.resolved).length,
+      activeAlerts: alerts.filter((alert) => !alert.resolved).length,
     },
     updatedAt: new Date().toISOString(),
   };
-}
-
-function emitChange() {
-  bus.emit('change', getState());
 }
 
 export function getHub(hubId) {
   return hubs.get(hubId);
 }
 
-/** Registra que o QR Code de um hub foi escaneado (chamado pela página mobile). */
 export function scanHub(hubId) {
   const hub = hubs.get(hubId);
   if (!hub) return null;
+
   addEvent(hubId, 'scan', `QR Code do ${hubId} escaneado pelo celular`);
   emitChange();
   return publicHub(hub);
 }
 
-/**
- * Processa uma solicitação de acesso: cria a sessão, LIBERA a fechadura
- * (via camada de hardware) e dispara a progressão temporizada de estados,
- * incluindo o RE-BLOQUEIO automático ao final do ciclo:
- *
- *   Autorizado → Liberada → Porta aberta → Sessão ativa
- *             → Porta fechada → Fechadura bloqueada (ciclo completo)
- *
- * A validação dos campos acontece na rota, antes de chegar aqui.
- */
-export function requestAccess(hubId, creds) {
+export function requestAccess(hubId, credentials) {
   const hub = hubs.get(hubId);
   if (!hub) throw new Error('Hub não encontrado');
 
-  clearTimers(hub); // reinicia qualquer sessão anterior em andamento
+  if (!hub.online) {
+    const error = new Error('O hub está offline');
+    error.code = 'HUB_OFFLINE';
+    throw error;
+  }
+
+  if (!isHardwareConnected()) {
+    const error = new Error('O backend não está conectado ao broker MQTT');
+    error.code = 'MQTT_OFFLINE';
+    throw error;
+  }
 
   const session = {
     id: randomUUID(),
-    name: creds.name,
-    phone: creds.phone,
-    plate: creds.plate,
-    email: creds.email || null,
+    name: credentials.name,
+    phone: credentials.phone,
+    plate: credentials.plate,
+    email: credentials.email || null,
     requestedAt: new Date().toISOString(),
   };
 
   hub.currentSession = session;
   hub.lastRequestAt = session.requestedAt;
-  hub.door = 'closed';
   hub.session = 'idle';
+
   requests.unshift({ hubId, ...session });
   if (requests.length > 50) requests.length = 50;
-  totalAccesses += 1;
 
-  addEvent(hubId, 'credentials', `Credenciais enviadas por ${session.name} — veículo ${session.plate}`);
-  addEvent(hubId, 'authorized', `Acesso autorizado para ${session.name}`);
-  hub.statusLabel = 'Acesso autorizado';
-  emitChange();
-
-  // ---- Liberação da fechadura (ponto de integração com hardware real) ----
-  unlockHub(hubId, session.id);
-  hub.lock = 'unlocked';
-  hub.statusLabel = 'Fechadura liberada';
-  addEvent(hubId, 'unlocked', `Fechadura liberada — sessão ${session.id.slice(0, 8)}`);
-  emitChange();
-
-  // Progressão temporizada: porta abre → sessão ativa → porta fecha → re-bloqueio.
-  hub._timers.push(
-    setTimeout(() => {
-      hub.door = 'open';
-      hub.statusLabel = 'Porta aberta';
-      addEvent(hubId, 'door', 'Sensor de porta: porta aberta');
-      emitChange();
-
-      hub._timers.push(
-        setTimeout(() => {
-          hub.session = 'active';
-          hub.statusLabel = 'Sessão de acesso ativa';
-          addEvent(hubId, 'session', 'Sessão de acesso ativa');
-          emitChange();
-
-          hub._timers.push(
-            setTimeout(() => {
-              hub.door = 'closed';
-              hub.statusLabel = 'Porta fechada';
-              addEvent(hubId, 'door', 'Sensor de porta: porta fechada');
-              emitChange();
-
-              hub._timers.push(
-                setTimeout(() => {
-                  lockHub(hubId);
-                  hub.lock = 'locked';
-                  hub.session = 'idle';
-                  hub.statusLabel = 'Fechadura bloqueada';
-                  addEvent(
-                    hubId,
-                    'relocked',
-                    `Sessão ${session.id.slice(0, 8)} encerrada — fechadura bloqueada automaticamente`
-                  );
-                  emitChange();
-                }, DELAY_RELOCK)
-              );
-            }, DELAY_DOOR_CLOSE)
-          );
-        }, DELAY_SESSION)
-      );
-    }, DELAY_DOOR_OPEN)
+  addEvent(
+    hubId,
+    'credentials',
+    `Credenciais enviadas por ${session.name} — veículo ${session.plate}`,
   );
+  addEvent(hubId, 'authorized', `Acesso autorizado para ${session.name}`);
+
+  hub.statusLabel = 'Aguardando confirmação do hub';
+  emitChange();
+
+  const dispatched = unlockHub(hubId, session.id, 5000);
+
+  if (!dispatched) {
+    hub.currentSession = null;
+    refreshStatusLabel(hub);
+    addEvent(hubId, 'error', 'Falha ao enviar comando de abertura ao hub');
+    emitChange();
+
+    const error = new Error('Não foi possível enviar o comando ao hub');
+    error.code = 'COMMAND_NOT_SENT';
+    throw error;
+  }
 
   return { session };
 }
 
-/**
- * Simula uma TENTATIVA DE VIOLAÇÃO detectada pelos sensores do hub
- * (tamper / vibração). Gera um alerta de segurança que fica ativo até
- * ser resolvido pelo operador no dashboard.
- */
+export function applyHardwareMessage(message) {
+  const { hubId, channel, data, receivedAt } = message;
+  const hub = hubs.get(hubId);
+
+  if (!hub) {
+    console.warn(`[STATE] Mensagem recebida de hub desconhecido: ${hubId}`);
+    return false;
+  }
+
+  hub.lastSeenAt = receivedAt || new Date().toISOString();
+
+  if (channel === 'availability') {
+    const online = data?.online === true;
+
+    if (!online) {
+      scheduleOffline(hub);
+      return true;
+    }
+
+    cancelOfflineTimer(hubId);
+    const changed = !hub.online;
+    hub.online = true;
+
+    if (changed) {
+      addEvent(hubId, 'online', `${hubId} conectado`);
+    }
+
+    requestStatus(hubId);
+    refreshStatusLabel(hub);
+    emitChange();
+    return true;
+  }
+
+  // Qualquer state/event válido prova que o dispositivo está online agora.
+  cancelOfflineTimer(hubId);
+  hub.online = true;
+
+  if (channel === 'state') {
+    applyStateSnapshot(hub, data || {});
+    refreshStatusLabel(hub);
+    emitChange();
+    return true;
+  }
+
+  if (channel !== 'event') return false;
+
+  const type = String(data?.type || data?.event || '').trim();
+  const sessionId = data?.sessionId || null;
+
+  switch (type) {
+    case 'system_started':
+      applyStateSnapshot(hub, data);
+      addEvent(hubId, 'online', `${hubId} inicializado e conectado`);
+      break;
+
+    case 'lock_unlocked':
+      hub.lock = 'unlocked';
+      hub.session = 'idle';
+
+      if (sessionId && !countedSessions.has(sessionId)) {
+        countedSessions.add(sessionId);
+        totalAccesses += 1;
+      }
+
+      addEvent(
+        hubId,
+        'unlocked',
+        `Fechadura liberada${sessionId ? ` — sessão ${sessionId.slice(0, 8)}` : ''}`,
+      );
+      break;
+
+    case 'lock_locked': {
+      hub.lock = 'locked';
+      if (hub.door === 'closed') hub.session = 'idle';
+
+      const endedSession = hub.currentSession?.id;
+      addEvent(
+        hubId,
+        'relocked',
+        endedSession
+          ? `Sessão ${endedSession.slice(0, 8)} encerrada — fechadura bloqueada`
+          : 'Fechadura bloqueada',
+      );
+
+      if (hub.door === 'closed') hub.currentSession = null;
+      break;
+    }
+
+    case 'door_opened':
+      hub.door = 'open';
+      hub.session = 'active';
+      addEvent(hubId, 'door', 'Sensor de porta: porta aberta');
+      addEvent(hubId, 'session', 'Sessão de acesso ativa');
+      break;
+
+    case 'door_closed':
+      hub.door = 'closed';
+      if (hub.lock === 'locked') {
+        hub.session = 'idle';
+        hub.currentSession = null;
+      }
+      addEvent(hubId, 'door', 'Sensor de porta: porta fechada');
+      break;
+
+    case 'tamper_detected':
+      hub.tamper = true;
+      createSecurityAlert(
+        hub,
+        'tamper',
+        `Abertura indevida da caixa detectada no ${hubId}`,
+      );
+      addEvent(
+        hubId,
+        'tamper',
+        `⚠ Tamper acionado no ${hubId} — operador notificado`,
+      );
+      break;
+
+    case 'tamper_normal':
+      hub.tamper = false;
+      addEvent(hubId, 'resolved', `Sensor tamper do ${hubId} voltou ao estado normal`);
+      break;
+
+    case 'vibration_detected':
+      hub.vibration = true;
+      // Mantém compatibilidade visual com o dashboard atual, que destaca hub.tamper.
+      hub.tamper = true;
+      createSecurityAlert(
+        hub,
+        'vibration',
+        `Vibração ou impacto detectado no ${hubId}`,
+      );
+      addEvent(
+        hubId,
+        'tamper',
+        `⚠ Vibração detectada no ${hubId} — operador notificado`,
+      );
+      break;
+
+    case 'vibration_finished':
+      hub.vibration = false;
+      addEvent(hubId, 'resolved', `Sensor de vibração do ${hubId} voltou ao estado normal`);
+      break;
+
+    case 'access_denied':
+      addEvent(
+        hubId,
+        'tamper',
+        `Abertura recusada pelo dispositivo: ${data?.reason || 'motivo não informado'}`,
+      );
+      break;
+
+    case 'unlock_ignored':
+      addEvent(
+        hubId,
+        'unlocked',
+        `Comando de abertura ignorado: ${data?.reason || 'motivo não informado'}`,
+      );
+      break;
+
+    case 'auto_lock':
+      addEvent(hubId, 'relocked', 'Temporizador de abertura encerrado');
+      break;
+
+    default:
+      addEvent(
+        hubId,
+        'hardware',
+        `Evento do dispositivo: ${type || JSON.stringify(data)}`,
+      );
+  }
+
+  refreshStatusLabel(hub);
+  emitChange();
+  return true;
+}
+
 export function triggerTamper(hubId) {
   const hub = hubs.get(hubId);
   if (!hub) return null;
 
   hub.tamper = true;
-  hub.statusLabel = 'ALERTA: tentativa de violação';
 
-  const alert = {
-    id: randomUUID(),
+  const alert = createSecurityAlert(
+    hub,
+    'tamper',
+    `Sensores detectaram vibração e tentativa de violação no ${hubId}`,
+  );
+
+  addEvent(
     hubId,
-    type: 'tamper',
-    message: `Sensores detectaram vibração e tentativa de violação no ${hubId}`,
-    at: new Date().toISOString(),
-    resolved: false,
-    resolvedAt: null,
-  };
-  alerts.unshift(alert);
-  if (alerts.length > 50) alerts.length = 50;
+    'tamper',
+    `⚠ Tentativa de violação detectada no ${hubId} — operador notificado`,
+  );
 
-  addEvent(hubId, 'tamper', `⚠ Tentativa de violação detectada no ${hubId} — operador notificado`);
+  refreshStatusLabel(hub);
   emitChange();
   return alert;
 }
 
-/** Marca um alerta como resolvido pelo operador. */
 export function resolveAlert(alertId) {
-  const alert = alerts.find((a) => a.id === alertId);
+  const alert = alerts.find((item) => item.id === alertId);
   if (!alert) return null;
+
   if (!alert.resolved) {
     alert.resolved = true;
     alert.resolvedAt = new Date().toISOString();
+
     const hub = hubs.get(alert.hubId);
-    if (hub) {
-      // Só limpa o estado de tamper se não houver outro alerta ativo no hub.
-      const stillActive = alerts.some((a) => a.hubId === alert.hubId && !a.resolved);
-      if (!stillActive) {
-        hub.tamper = false;
-        if (hub.lock === 'locked' && hub.door === 'closed' && hub.session === 'idle') {
-          hub.statusLabel = 'Fechadura bloqueada';
-        }
-      }
+    if (hub && !hasActiveSecurityAlert(hub.id)) {
+      hub.tamper = false;
+      refreshStatusLabel(hub);
     }
-    addEvent(alert.hubId, 'resolved', `Alerta de violação do ${alert.hubId} verificado e resolvido pelo operador`);
+
+    addEvent(
+      alert.hubId,
+      'resolved',
+      `Alerta de violação do ${alert.hubId} verificado e resolvido pelo operador`,
+    );
     emitChange();
   }
+
   return alert;
 }
 
-/** Reseta um hub específico de volta ao estado "Fechadura bloqueada". */
 export function resetHub(hubId) {
   const hub = hubs.get(hubId);
   if (!hub) return null;
-  clearTimers(hub);
-  lockHub(hubId);
+
+  lockHub(hubId, 'manual_reset');
+
   hub.lock = 'locked';
   hub.door = 'closed';
   hub.session = 'idle';
   hub.tamper = false;
-  hub.statusLabel = 'Fechadura bloqueada';
+  hub.vibration = false;
   hub.currentSession = null;
-  for (const a of alerts) {
-    if (a.hubId === hubId && !a.resolved) {
-      a.resolved = true;
-      a.resolvedAt = new Date().toISOString();
+
+  for (const alert of alerts) {
+    if (alert.hubId === hubId && !alert.resolved) {
+      alert.resolved = true;
+      alert.resolvedAt = new Date().toISOString();
     }
   }
+
+  refreshStatusLabel(hub);
   addEvent(hubId, 'reset', `Demonstração do ${hubId} resetada manualmente`);
   emitChange();
+
+  if (hub.online) requestStatus(hubId);
   return publicHub(hub);
 }
 
-/** Reseta todos os hubs (e limpa alertas ativos). */
 export function resetAll() {
-  for (const hubId of hubs.keys()) {
-    const hub = hubs.get(hubId);
-    clearTimers(hub);
-    lockHub(hubId);
+  for (const hub of hubs.values()) {
+    lockHub(hub.id, 'reset_all');
+
     hub.lock = 'locked';
     hub.door = 'closed';
     hub.session = 'idle';
     hub.tamper = false;
-    hub.statusLabel = 'Fechadura bloqueada';
+    hub.vibration = false;
     hub.currentSession = null;
+    refreshStatusLabel(hub);
   }
-  for (const a of alerts) {
-    if (!a.resolved) {
-      a.resolved = true;
-      a.resolvedAt = new Date().toISOString();
+
+  for (const alert of alerts) {
+    if (!alert.resolved) {
+      alert.resolved = true;
+      alert.resolvedAt = new Date().toISOString();
     }
   }
+
   addEvent(null, 'reset', 'Demonstração completa resetada (todos os hubs)');
   emitChange();
 }

@@ -22,3 +22,4 @@ Thumbs.db
 
 # Configuração local do Claude Code (preview)
 .claude/
+.env
