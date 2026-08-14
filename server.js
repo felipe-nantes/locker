@@ -80,6 +80,16 @@ app.get('/dashboard', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
 });
 
+// Atalhos tolerantes para o acesso pelo celular. Evitam o "Cannot GET"
+// quando o usuário digita apenas /access ou o identificador do hub.
+app.get(['/access', '/access/'], (_req, res) => {
+  res.redirect(302, '/access/HUB-001');
+});
+
+app.get(['/HUB-001', '/hub-001'], (_req, res) => {
+  res.redirect(302, '/access/HUB-001');
+});
+
 app.get('/access/:hubId', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'mobile.html'));
 });
