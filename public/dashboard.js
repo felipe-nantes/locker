@@ -7,8 +7,12 @@
   const $requests = document.getElementById('requests');
   const $events = document.getElementById('events');
   const $alerts = document.getElementById('alerts');
+  const $accessLogs = document.getElementById('access-logs');
   const $connChip = document.getElementById('conn-chip');
   const $connText = document.getElementById('conn-text');
+  const $soundToggle = document.getElementById('sound-toggle');
+  const $soundLabel = document.getElementById('sound-label');
+  const $soundStatus = document.getElementById('sound-status');
 
   const $kpiHubs = document.getElementById('kpi-hubs');
   const $kpiOnline = document.getElementById('kpi-online');
@@ -17,6 +21,194 @@
   const $kpiAlertsCard = document.getElementById('kpi-alerts-card');
 
   let baseUrl = window.location.origin; // trocado pelo IP local via /api/config
+  let latestState = null;
+
+  // ---------------------------------------------------------------------
+  // Central sonora — Web Audio API, sem arquivos externos
+  // ---------------------------------------------------------------------
+  const SOUND_PREF_KEY = 'nexlock-dashboard-sound';
+  const knownEventIds = new Set();
+  let eventAudioReady = false;
+  let audioContext = null;
+  let soundEnabled = false;
+
+  try {
+    soundEnabled = window.localStorage.getItem(SOUND_PREF_KEY) === 'enabled';
+  } catch (_) {}
+
+  function getAudioContext() {
+    if (audioContext) return audioContext;
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return null;
+    audioContext = new AudioContextClass();
+    return audioContext;
+  }
+
+  function updateSoundControl() {
+    if (!$soundToggle) return;
+    const running = soundEnabled && audioContext?.state === 'running';
+    $soundToggle.classList.toggle('enabled', running);
+    $soundToggle.classList.toggle('pending', soundEnabled && !running);
+    $soundToggle.setAttribute('aria-pressed', String(soundEnabled));
+    $soundToggle.title = running
+      ? 'Desativar os alertas sonoros deste painel'
+      : soundEnabled
+        ? 'Clique para reativar o áudio deste painel'
+        : 'Ativar os alertas sonoros deste painel';
+    $soundLabel.textContent = running
+      ? 'Som ativo'
+      : soundEnabled
+        ? 'Reativar som'
+        : 'Ativar som';
+  }
+
+  async function resumeAudio() {
+    if (!soundEnabled) return false;
+    const context = getAudioContext();
+    if (!context) {
+      soundEnabled = false;
+      $soundStatus.textContent = 'Este navegador não oferece suporte aos alertas sonoros.';
+      updateSoundControl();
+      return false;
+    }
+
+    try {
+      if (context.state !== 'running') await context.resume();
+    } catch (_) {}
+    updateSoundControl();
+    return context.state === 'running';
+  }
+
+  function scheduleTone({
+    frequency,
+    endFrequency = frequency,
+    offset = 0,
+    duration = 0.2,
+    volume = 0.045,
+    type = 'sine',
+  }) {
+    if (!audioContext || audioContext.state !== 'running') return;
+    const start = audioContext.currentTime + offset;
+    const stop = start + duration;
+    const oscillator = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+
+    oscillator.type = type;
+    oscillator.frequency.setValueAtTime(frequency, start);
+    oscillator.frequency.exponentialRampToValueAtTime(Math.max(1, endFrequency), stop);
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.exponentialRampToValueAtTime(volume, start + Math.min(0.025, duration / 3));
+    gain.gain.exponentialRampToValueAtTime(0.0001, stop);
+
+    oscillator.connect(gain);
+    gain.connect(audioContext.destination);
+    oscillator.start(start);
+    oscillator.stop(stop + 0.03);
+  }
+
+  function playSound(kind) {
+    if (!soundEnabled || !audioContext || audioContext.state !== 'running') return;
+
+    if (kind === 'unlock') {
+      scheduleTone({ frequency: 392, endFrequency: 523, duration: 0.28, volume: 0.04 });
+      scheduleTone({ frequency: 659, endFrequency: 784, offset: 0.16, duration: 0.34, volume: 0.045 });
+      return;
+    }
+
+    if (kind === 'lock') {
+      scheduleTone({ frequency: 523, endFrequency: 330, duration: 0.34, volume: 0.045, type: 'triangle' });
+      scheduleTone({ frequency: 165, endFrequency: 120, offset: 0.21, duration: 0.24, volume: 0.035, type: 'square' });
+      return;
+    }
+
+    if (kind === 'tamper') {
+      [0, 0.18, 0.36, 0.54, 0.72].forEach((offset, index) => {
+        scheduleTone({
+          frequency: index % 2 === 0 ? 880 : 620,
+          endFrequency: index % 2 === 0 ? 1040 : 720,
+          offset,
+          duration: 0.14,
+          volume: 0.055,
+          type: 'sawtooth',
+        });
+      });
+      return;
+    }
+
+    if (kind === 'vibration') {
+      [0, 0.11, 0.22, 0.33, 0.44, 0.55].forEach((offset, index) => {
+        scheduleTone({
+          frequency: index % 2 === 0 ? 135 : 95,
+          endFrequency: 72,
+          offset,
+          duration: 0.09,
+          volume: 0.06,
+          type: 'triangle',
+        });
+      });
+      return;
+    }
+
+    scheduleTone({ frequency: 520, endFrequency: 620, duration: 0.18, volume: 0.025 });
+    scheduleTone({ frequency: 720, endFrequency: 820, offset: 0.12, duration: 0.22, volume: 0.03 });
+  }
+
+  function soundForEvent(event) {
+    if (event?.type === 'unlocked') return 'unlock';
+    if (event?.type === 'relocked') return 'lock';
+    if (event?.type === 'tamper') {
+      return /vibra|impacto/i.test(event.message || '') ? 'vibration' : 'tamper';
+    }
+    return null;
+  }
+
+  function processSoundEvents(events = []) {
+    if (!eventAudioReady) {
+      events.forEach((event) => knownEventIds.add(event.id));
+      eventAudioReady = true;
+      return;
+    }
+
+    const newEvents = events
+      .filter((event) => event?.id && !knownEventIds.has(event.id))
+      .reverse();
+    events.forEach((event) => knownEventIds.add(event.id));
+
+    if (knownEventIds.size > 300) {
+      knownEventIds.clear();
+      events.forEach((event) => knownEventIds.add(event.id));
+    }
+
+    for (const event of newEvents) {
+      const sound = soundForEvent(event);
+      if (!sound || !soundEnabled) continue;
+      void resumeAudio().then((running) => {
+        if (running) playSound(sound);
+      });
+    }
+  }
+
+  async function setSoundEnabled(enabled, preview = false) {
+    soundEnabled = enabled;
+    try {
+      window.localStorage.setItem(SOUND_PREF_KEY, enabled ? 'enabled' : 'disabled');
+    } catch (_) {}
+
+    if (!enabled) {
+      if (audioContext?.state === 'running') await audioContext.suspend();
+      $soundStatus.textContent = 'Alertas sonoros desativados.';
+      updateSoundControl();
+      return;
+    }
+
+    const running = await resumeAudio();
+    $soundStatus.textContent = running
+      ? 'Alertas sonoros ativados. Som de teste reproduzido.'
+      : 'Clique novamente para autorizar o áudio do painel.';
+    if (running && preview) playSound('preview');
+  }
+
+  updateSoundControl();
 
   // ---------------------------------------------------------------------
   // Ícones SVG reutilizáveis
@@ -46,6 +238,7 @@
     unlocked: icons.lockOpen,
     door: icons.door,
     session: icons.bolt,
+    'access-completed': icons.clock,
     relocked: icons.lockClosed,
     tamper: icons.alert,
     resolved: icons.shield,
@@ -64,6 +257,36 @@
     const d = new Date(iso);
     return d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   };
+
+  const fmtDateTime = (iso) => {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleString('pt-BR', {
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  };
+
+  const fmtDuration = (durationMs) => {
+    const totalSeconds = Math.max(0, Math.floor(Number(durationMs || 0) / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return [hours, minutes, seconds]
+      .map((part) => String(part).padStart(2, '0'))
+      .join(':');
+  };
+
+  function updateLiveTimers() {
+    document.querySelectorAll('[data-access-started-at]').forEach((timer) => {
+      const startedAt = new Date(timer.dataset.accessStartedAt).getTime();
+      if (Number.isFinite(startedAt)) {
+        timer.textContent = fmtDuration(Date.now() - startedAt);
+      }
+    });
+  }
 
   const statusClass = (hub) => {
     if (hub.tamper) return 'status-tamper';
@@ -88,6 +311,27 @@
   function renderHub(hub) {
     const s = hub.currentSession;
     const unlocked = hub.lock === 'unlocked';
+    const accessStartedAt = s?.startedAt || hub.accessStartedAt;
+    const accessPhaseLabel = hub.door === 'open'
+      ? 'MC-38 aberto — feche a porta para travar'
+      : 'Aguardando o usuário abrir o MC-38';
+
+    const accessTimerHtml = unlocked && accessStartedAt
+      ? `<div class="access-chronograph" aria-live="polite">
+           <div class="chronograph-head">
+             <span class="chronograph-label"><span class="live-pulse"></span> Tempo com a trava liberada</span>
+             <strong class="access-timer" data-access-started-at="${esc(accessStartedAt)}">${fmtDuration(hub.accessElapsedMs)}</strong>
+           </div>
+           <div class="access-phase">${icons.door}<span>${accessPhaseLabel}</span></div>
+           <div class="access-route" aria-label="Etapas do acesso">
+             <span class="done">Liberada</span>
+             <span class="${hub.doorOpenedDuringAccess || hub.door === 'open' ? 'done' : 'current'}">Porta aberta</span>
+             <span class="pending">Fechar e travar</span>
+           </div>
+         </div>`
+      : hub.lastAccessDurationMs != null
+        ? `<div class="last-access-duration">${icons.clock}<span>Último acesso:</span><b>${fmtDuration(hub.lastAccessDurationMs)}</b></div>`
+        : '';
 
     const sessionHtml = s
       ? `<div class="session-box">
@@ -96,6 +340,7 @@
            <div class="session-row"><span class="k">${icons.car} Placa</span><b>${esc(s.plate)}</b></div>
            ${s.email ? `<div class="session-row"><span class="k">${icons.mail} E-mail</span><b>${esc(s.email)}</b></div>` : ''}
            <div class="session-row"><span class="k">${icons.clock} Horário</span><b>${fmtTime(s.requestedAt)}</b></div>
+           ${s.startedAt ? `<div class="session-row"><span class="k">${icons.bolt} Liberada</span><b>${fmtTime(s.startedAt)}</b></div>` : ''}
          </div>`
       : `<div class="session-box empty">Última solicitação: nenhuma</div>`;
 
@@ -109,7 +354,12 @@
     const lockText = hub.tamper
       ? { t1: 'Tentativa de violação detectada', t2: 'Sensores tamper/vibração dispararam — verificar local' }
       : unlocked
-        ? { t1: 'Fechadura liberada', t2: 'Comando unlockHub() executado — acesso em andamento' }
+        ? {
+            t1: hub.door === 'open' ? 'Porta aberta' : 'Fechadura liberada',
+            t2: hub.door === 'open'
+              ? 'O fechamento do MC-38 travará o hub imediatamente'
+              : 'Sem temporizador — aguardando abertura do MC-38',
+          }
         : { t1: 'Fechadura bloqueada', t2: 'Aguardando autenticação por QR Code' };
 
     return `
@@ -131,7 +381,7 @@
         <div class="badges">
           <span class="chip">${unlocked ? icons.lockOpen : icons.lockClosed}&nbsp;Fechadura: <b>&nbsp;${unlocked ? 'Liberada' : 'Bloqueada'}</b></span>
           <span class="chip">${icons.door}&nbsp;Porta: <b>&nbsp;${hub.door === 'open' ? 'Aberta' : 'Fechada'}</b></span>
-          <span class="chip">${icons.bolt}&nbsp;Sessão: <b>&nbsp;${hub.session === 'active' ? 'Ativa' : '—'}</b></span>
+          <span class="chip">${icons.bolt}&nbsp;Sessão: <b>&nbsp;${unlocked ? (hub.door === 'open' ? 'Porta aberta' : 'Aguardando porta') : '—'}</b></span>
         </div>
 
         <div class="lockviz ${hub.tamper ? 'tamper' : unlocked ? 'unlocked' : 'locked'}">
@@ -147,6 +397,7 @@
           </div>
         </div>
 
+        ${accessTimerHtml}
         ${authorizedBanner}
         ${sessionHtml}
 
@@ -228,9 +479,44 @@
           <div class="ico">${eventIcons[ev.type] || icons.clock}</div>
           <div class="body">
             <div class="msg">${esc(ev.message)}</div>
-            <div class="meta">${ev.hubId ? `<span class="hub">${esc(ev.hubId)}</span>` : ''}<span>${fmtTime(ev.at)}</span></div>
+            <div class="meta">${ev.hubId ? `<span class="hub">${esc(ev.hubId)}</span>` : ''}<span>${fmtTime(ev.at)}</span>${ev.durationMs != null ? `<span class="event-duration">${fmtDuration(ev.durationMs)}</span>` : ''}</div>
           </div>
         </div>`
+      )
+      .join('');
+  }
+
+  function renderAccessLogs(logs) {
+    if (!$accessLogs) return;
+    if (!logs?.length) {
+      $accessLogs.innerHTML = '<div class="empty-note">Nenhum ciclo completo registrado ainda.</div>';
+      return;
+    }
+
+    $accessLogs.innerHTML = logs
+      .map(
+        (log) => `
+        <article class="access-log-row">
+          <div class="access-log-duration">
+            <span>DURAÇÃO</span>
+            <strong>${fmtDuration(log.durationMs)}</strong>
+          </div>
+          <div class="access-log-main">
+            <div class="access-log-title">
+              <b>${esc(log.name)}</b>
+              ${log.plate ? `<span class="tag">${esc(log.plate)}</span>` : ''}
+              <span class="tag">${esc(log.hubId)}</span>
+            </div>
+            <div class="access-log-times">
+              <span>${icons.lockOpen} ${fmtDateTime(log.startedAt)}</span>
+              <span>${icons.door} ${log.doorOpenedAt ? fmtTime(log.doorOpenedAt) : 'porta não aberta'}</span>
+              <span>${icons.lockClosed} ${fmtTime(log.endedAt)}</span>
+            </div>
+          </div>
+          <span class="access-log-result ${log.completedByDoor ? 'success' : 'interrupted'}">
+            ${log.completedByDoor ? 'MC-38 concluído' : 'Interrompido'}
+          </span>
+        </article>`,
       )
       .join('');
   }
@@ -245,16 +531,29 @@
   }
 
   function render(state) {
+    latestState = state;
+    processSoundEvents(state.events || []);
     renderKpis(state.stats);
     $hubs.innerHTML = state.hubs.map(renderHub).join('');
     renderAlerts(state.alerts || []);
     renderRequests(state.requests);
     renderEvents(state.events);
+    renderAccessLogs(state.accessLogs || []);
+    updateLiveTimers();
   }
 
   // ---------------------------------------------------------------------
   // Ações
   // ---------------------------------------------------------------------
+  $soundToggle?.addEventListener('click', () => {
+    const needsActivation = soundEnabled && audioContext?.state !== 'running';
+    void setSoundEnabled(needsActivation || !soundEnabled, true);
+  });
+
+  document.addEventListener('pointerdown', () => {
+    if (soundEnabled && audioContext?.state !== 'running') void resumeAudio();
+  }, { passive: true });
+
   document.getElementById('btn-reset-all').addEventListener('click', () => {
     fetch('/api/reset-all', { method: 'POST' });
   });
@@ -322,7 +621,7 @@
     .then((r) => r.json())
     .then((cfg) => {
       baseUrl = cfg.baseUrl;
-      // Re-renderiza com a URL correta assim que o estado chegar.
+      if (latestState) render(latestState);
     })
     .catch(() => {});
 
@@ -341,4 +640,5 @@
     };
   }
   connect();
+  setInterval(updateLiveTimers, 250);
 })();

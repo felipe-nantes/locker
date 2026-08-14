@@ -94,6 +94,10 @@ app.get('/api/config', (_req, res) => {
 
 app.get('/api/state', (_req, res) => res.json(store.getState()));
 
+app.get('/api/access-logs', (_req, res) => {
+  res.json({ logs: store.getAccessLogs() });
+});
+
 app.get('/api/hubs/:hubId', (req, res) => {
   const hub = store.getHub(req.params.hubId);
   if (!hub) return res.status(404).json({ error: 'Hub não encontrado' });
@@ -166,7 +170,11 @@ app.post('/api/hubs/:hubId/access', (req, res) => {
       'COMMAND_NOT_SENT',
     ];
 
-    const status = serviceUnavailableCodes.includes(error.code) ? 503 : 500;
+    const status = error.code === 'ACCESS_IN_PROGRESS'
+      ? 409
+      : serviceUnavailableCodes.includes(error.code)
+        ? 503
+        : 500;
 
     return res.status(status).json({
       error: error.message || 'Erro ao solicitar acesso',

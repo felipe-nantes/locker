@@ -11,6 +11,7 @@ logs/
 # Variáveis de ambiente
 .env
 .env.*
+data/access-log.jsonl
 
 # Arquivos de sistema operacional
 .DS_Store

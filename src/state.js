@@ -1,6 +1,14 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+} from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
   isHardwareConnected,
   lockHub,
   requestStatus,
@@ -8,6 +16,35 @@ import {
 } from './hardware.js';
 
 export const bus = new EventEmitter();
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DATA_DIR = path.join(__dirname, '..', 'data');
+const ACCESS_LOG_PATH = path.join(DATA_DIR, 'access-log.jsonl');
+
+function loadAccessLogs() {
+  if (!existsSync(ACCESS_LOG_PATH)) return [];
+
+  try {
+    return readFileSync(ACCESS_LOG_PATH, 'utf8')
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .reverse()
+      .slice(0, 200);
+  } catch (error) {
+    console.error('[ACCESS LOG] Falha ao carregar histórico:', error.message);
+    return [];
+  }
+}
+
+function persistAccessLog(entry) {
+  try {
+    mkdirSync(DATA_DIR, { recursive: true });
+    appendFileSync(ACCESS_LOG_PATH, `${JSON.stringify(entry)}\n`, 'utf8');
+  } catch (error) {
+    console.error('[ACCESS LOG] Falha ao persistir sessão:', error.message);
+  }
+}
 
 const HUB_DEFS = [
   { id: 'HUB-001', name: 'Carregador Protegido', location: 'Posto Demonstração' },
@@ -23,9 +60,10 @@ for (const definition of HUB_DEFS) {
 let events = [];
 let requests = [];
 let alerts = [];
-let totalAccesses = 0;
+let accessLogs = loadAccessLogs();
+let totalAccesses = accessLogs.length;
 
-const countedSessions = new Set();
+const countedSessions = new Set(accessLogs.map((entry) => entry.sessionId));
 
 // Evita que quedas muito curtas do Wokwi façam o dashboard piscar offline.
 // Pode ser configurado no .env: HUB_OFFLINE_GRACE_MS=15000
@@ -48,18 +86,24 @@ function freshHub(definition) {
     vibration: false,
     statusLabel: 'Hub offline',
     currentSession: null,
+    accessPhase: 'idle',
+    accessStartedAt: null,
+    accessElapsedMs: 0,
+    doorOpenedDuringAccess: false,
+    lastAccessDurationMs: null,
     lastRequestAt: null,
     lastSeenAt: null,
   };
 }
 
-function addEvent(hubId, type, message) {
+function addEvent(hubId, type, message, details = {}) {
   const event = {
     id: randomUUID(),
     hubId,
     type,
     message,
     at: new Date().toISOString(),
+    ...details,
   };
 
   events.unshift(event);
@@ -90,13 +134,15 @@ function refreshStatusLabel(hub) {
     return;
   }
 
-  if (hub.door === 'open') {
-    hub.statusLabel = 'Sessão de acesso ativa';
+  if (hub.lock === 'unlocked') {
+    hub.statusLabel = hub.door === 'open'
+      ? 'Porta aberta — aguardando fechamento'
+      : 'Fechadura liberada — aguardando abertura';
     return;
   }
 
-  if (hub.lock === 'unlocked') {
-    hub.statusLabel = 'Fechadura liberada';
+  if (hub.door === 'open') {
+    hub.statusLabel = 'Porta aberta';
     return;
   }
 
@@ -174,12 +220,75 @@ function applyStateSnapshot(hub, data) {
 
   hub.tamper = normalizeBoolean(data.tamper, hub.tamper);
   hub.vibration = normalizeBoolean(data.vibration, hub.vibration);
+  hub.doorOpenedDuringAccess = normalizeBoolean(
+    data.doorOpenedDuringAccess,
+    hub.doorOpenedDuringAccess,
+  );
 
-  if (hub.door === 'open') {
+  if (typeof data.accessPhase === 'string' && data.accessPhase) {
+    hub.accessPhase = data.accessPhase;
+  }
+
+  const elapsedMs = Number(data.unlockElapsedMs);
+  if (Number.isFinite(elapsedMs) && elapsedMs >= 0) {
+    hub.accessElapsedMs = elapsedMs;
+  }
+
+  if (hub.lock === 'unlocked' && !hub.accessStartedAt) {
+    hub.accessStartedAt = new Date(
+      Date.now() - Math.max(0, hub.accessElapsedMs || 0),
+    ).toISOString();
+  }
+
+  if (hub.lock === 'unlocked' && hub.door === 'open') {
     hub.session = 'active';
   } else if (hub.lock === 'locked') {
     hub.session = 'idle';
+    hub.accessPhase = 'idle';
   }
+}
+
+function formatDuration(durationMs) {
+  const totalSeconds = Math.max(0, Math.floor(Number(durationMs || 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return [hours, minutes, seconds].map((part) => String(part).padStart(2, '0')).join(':');
+}
+
+function recordAccessCompletion(hub, sessionId, data, receivedAt) {
+  if (!sessionId) return null;
+
+  const existing = accessLogs.find((entry) => entry.sessionId === sessionId);
+  if (existing) return existing;
+
+  const session = hub.currentSession?.id === sessionId
+    ? hub.currentSession
+    : requests.find((request) => request.id === sessionId);
+  const durationMs = Math.max(0, Number(data?.accessDurationMs || 0));
+  const endedAt = receivedAt || new Date().toISOString();
+  const derivedStartedAt = new Date(
+    Math.max(0, new Date(endedAt).getTime() - durationMs),
+  ).toISOString();
+
+  const entry = {
+    id: randomUUID(),
+    hubId: hub.id,
+    sessionId,
+    name: session?.name || 'Usuário não identificado',
+    plate: session?.plate || null,
+    startedAt: session?.startedAt || hub.accessStartedAt || derivedStartedAt,
+    doorOpenedAt: session?.doorOpenedAt || null,
+    endedAt,
+    durationMs,
+    reason: String(data?.reason || 'hardware_lock'),
+    completedByDoor: data?.reason === 'door_closed_after_open',
+  };
+
+  accessLogs.unshift(entry);
+  if (accessLogs.length > 200) accessLogs.length = 200;
+  persistAccessLog(entry);
+  return entry;
 }
 
 export function getState() {
@@ -189,6 +298,7 @@ export function getState() {
     hubs: hubList.map(publicHub),
     events: events.slice(0, 50),
     requests: requests.slice(0, 20),
+    accessLogs: accessLogs.slice(0, 50),
     alerts: alerts.slice(0, 20),
     stats: {
       hubsTotal: hubList.length,
@@ -198,6 +308,10 @@ export function getState() {
     },
     updatedAt: new Date().toISOString(),
   };
+}
+
+export function getAccessLogs() {
+  return accessLogs.slice(0, 200);
 }
 
 export function getHub(hubId) {
@@ -229,6 +343,12 @@ export function requestAccess(hubId, credentials) {
     throw error;
   }
 
+  if (hub.lock === 'unlocked' || hub.currentSession) {
+    const error = new Error('Já existe uma sessão de acesso em andamento');
+    error.code = 'ACCESS_IN_PROGRESS';
+    throw error;
+  }
+
   const session = {
     id: randomUUID(),
     name: credentials.name,
@@ -236,11 +356,18 @@ export function requestAccess(hubId, credentials) {
     plate: credentials.plate,
     email: credentials.email || null,
     requestedAt: new Date().toISOString(),
+    startedAt: null,
+    doorOpenedAt: null,
+    accessPhase: 'awaiting_unlock',
   };
 
   hub.currentSession = session;
   hub.lastRequestAt = session.requestedAt;
   hub.session = 'idle';
+  hub.accessPhase = 'awaiting_unlock';
+  hub.accessStartedAt = null;
+  hub.accessElapsedMs = 0;
+  hub.doorOpenedDuringAccess = false;
 
   requests.unshift({ hubId, ...session });
   if (requests.length > 50) requests.length = 50;
@@ -255,7 +382,7 @@ export function requestAccess(hubId, credentials) {
   hub.statusLabel = 'Aguardando confirmação do hub';
   emitChange();
 
-  const dispatched = unlockHub(hubId, session.id, 5000);
+  const dispatched = unlockHub(hubId, session.id);
 
   if (!dispatched) {
     hub.currentSession = null;
@@ -327,8 +454,17 @@ export function applyHardwareMessage(message) {
       break;
 
     case 'lock_unlocked':
+      applyStateSnapshot(hub, data || {});
       hub.lock = 'unlocked';
-      hub.session = 'idle';
+      hub.session = hub.door === 'open' ? 'active' : 'idle';
+      hub.accessPhase = hub.door === 'open' ? 'door_open' : 'awaiting_open';
+      hub.accessStartedAt = receivedAt || new Date().toISOString();
+      hub.accessElapsedMs = 0;
+
+      if (hub.currentSession?.id === sessionId) {
+        hub.currentSession.startedAt = hub.accessStartedAt;
+        hub.currentSession.accessPhase = hub.accessPhase;
+      }
 
       if (sessionId && !countedSessions.has(sessionId)) {
         countedSessions.add(sessionId);
@@ -338,11 +474,32 @@ export function applyHardwareMessage(message) {
       addEvent(
         hubId,
         'unlocked',
-        `Fechadura liberada${sessionId ? ` — sessão ${sessionId.slice(0, 8)}` : ''}`,
+        `Fechadura liberada sem temporizador${sessionId ? ` — sessão ${sessionId.slice(0, 8)}` : ''}`,
       );
       break;
 
+    case 'access_completed': {
+      const accessLog = recordAccessCompletion(hub, sessionId, data, receivedAt);
+      const durationMs = accessLog?.durationMs || Number(data?.accessDurationMs || 0);
+      hub.lastAccessDurationMs = durationMs;
+      hub.accessElapsedMs = durationMs;
+      hub.accessPhase = 'completed';
+
+      addEvent(
+        hubId,
+        'access-completed',
+        `Acesso concluído em ${formatDuration(durationMs)} — ${
+          data?.reason === 'door_closed_after_open'
+            ? 'MC-38 fechou e a trava foi acionada'
+            : `encerrado por ${data?.reason || 'comando do hardware'}`
+        }`,
+        { durationMs, sessionId, reason: data?.reason || null },
+      );
+      break;
+    }
+
     case 'lock_locked': {
+      applyStateSnapshot(hub, data || {});
       hub.lock = 'locked';
       if (hub.door === 'closed') hub.session = 'idle';
 
@@ -356,14 +513,23 @@ export function applyHardwareMessage(message) {
       );
 
       if (hub.door === 'closed') hub.currentSession = null;
+      hub.accessStartedAt = null;
+      hub.doorOpenedDuringAccess = false;
+      hub.accessPhase = 'idle';
       break;
     }
 
     case 'door_opened':
       hub.door = 'open';
       hub.session = 'active';
+      hub.accessPhase = hub.lock === 'unlocked' ? 'door_open' : hub.accessPhase;
+      hub.doorOpenedDuringAccess = hub.lock === 'unlocked';
+      if (hub.currentSession && hub.lock === 'unlocked') {
+        hub.currentSession.doorOpenedAt = receivedAt || new Date().toISOString();
+        hub.currentSession.accessPhase = 'door_open';
+      }
       addEvent(hubId, 'door', 'Sensor de porta: porta aberta');
-      addEvent(hubId, 'session', 'Sessão de acesso ativa');
+      addEvent(hubId, 'session', 'MC-38 aberto — aguardando fechamento para travar');
       break;
 
     case 'door_closed':
@@ -508,6 +674,10 @@ export function resetHub(hubId) {
   hub.tamper = false;
   hub.vibration = false;
   hub.currentSession = null;
+  hub.accessPhase = 'idle';
+  hub.accessStartedAt = null;
+  hub.accessElapsedMs = 0;
+  hub.doorOpenedDuringAccess = false;
 
   for (const alert of alerts) {
     if (alert.hubId === hubId && !alert.resolved) {
@@ -534,6 +704,10 @@ export function resetAll() {
     hub.tamper = false;
     hub.vibration = false;
     hub.currentSession = null;
+    hub.accessPhase = 'idle';
+    hub.accessStartedAt = null;
+    hub.accessElapsedMs = 0;
+    hub.doorOpenedDuringAccess = false;
     refreshStatusLabel(hub);
   }
 

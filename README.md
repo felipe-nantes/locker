@@ -12,10 +12,13 @@ Cliente escaneia o QR Code
 → operador autoriza a abertura
 → backend envia comando MQTT
 → ESP32 recebe o comando
-→ relé libera a fechadura
+→ relé libera a fechadura sem temporizador
+→ usuário abre o MC-38
+→ usuário fecha o MC-38
+→ ESP32 trava imediatamente e publica a duração total
 → sensores monitoram porta, tamper e vibração
 → ESP32 envia eventos de volta ao backend
-→ dashboard atualiza tudo em tempo real
+→ backend persiste o acesso e o dashboard atualiza tudo em tempo real
 ```
 
 A demonstração pode funcionar inicialmente com um **ESP32 virtual no Wokwi** e depois ser migrada para um **ESP32 físico**, mantendo o mesmo protocolo de comunicação e reduzindo a necessidade de alterações no backend.
@@ -29,6 +32,8 @@ A demonstração pode funcionar inicialmente com um **ESP32 virtual no Wokwi** e
 | `/` | Página de apresentação do projeto: problema, solução, funcionamento, modelo de negócio e roadmap |
 | `/dashboard` | Painel do operador: KPIs, hubs, alertas, solicitações e histórico de eventos |
 | `/access/HUB-001` | Página mobile aberta pelo QR Code para envio das credenciais do usuário |
+
+No primeiro uso do dashboard, clique em **Ativar som**. Esse clique é exigido pelos navegadores para liberar a saída de áudio. Depois disso, o painel toca assinaturas diferentes para tamper, vibração, fechadura liberada e fechadura travada; a preferência permanece salva no navegador.
 
 ---
 
@@ -77,6 +82,8 @@ Inicie o servidor:
 ```bash
 npm start
 ```
+
+No Windows, também é possível dar duplo clique em `iniciar-nexlock.cmd`. O atalho detecta a porta do `.env`, evita iniciar uma segunda instância, instala dependências se necessário e abre o dashboard quando frontend e backend estiverem prontos.
 
 O terminal deve mostrar os endereços da demonstração, por exemplo:
 
@@ -157,8 +164,10 @@ Na primeira execução, o Windows pode perguntar sobre o firewall. Se aparecer, 
 locker/
 ├── server.js            # Servidor Express: rotas, SSE, QR Code, detecção de IP e inicialização MQTT
 ├── src/
-│   ├── state.js         # Estado em memória, sessões, eventos, alertas e atualização dos hubs
+│   ├── state.js         # Estado, sessões, eventos, alertas e persistência dos acessos
 │   └── hardware.js      # Camada de comunicação MQTT com ESP32 virtual ou físico
+├── data/
+│   └── access-log.jsonl # Histórico local persistente (gerado em execução e ignorado pelo Git)
 ├── public/
 │   ├── styles.css       # Design system da demonstração
 │   ├── fonts/           # Fontes locais
@@ -208,13 +217,25 @@ Broker MQTT entrega comando ao ESP32
 ESP32 aciona relé e libera fechadura
         │
         ▼
+MC-38 abre e confirma que o usuário abriu o hub
+        │
+        ▼
+MC-38 fecha e o ESP32 trava imediatamente
+        │
+        ▼
+ESP32 publica a duração total do acesso
+        │
+        ▼
 ESP32 publica eventos e estado
         │
         ▼
 Backend recebe mensagens MQTT
         │
         ▼
-Dashboard atualiza em tempo real via SSE
+Backend persiste o acesso em JSONL
+        │
+        ▼
+Dashboard atualiza cronômetro e histórico via SSE
 ```
 
 ---
@@ -290,10 +311,12 @@ Exemplo de comando para liberar a fechadura:
 {
   "type": "unlock",
   "sessionId": "id-da-sessao",
-  "durationMs": 5000,
+  "mode": "until_door_cycle",
   "sentAt": "2026-07-14T15:00:00.000Z"
 }
 ```
+
+O comando não possui tempo limite de liberação. Depois de autorizado, o relé permanece energizado até que o MC-38 registre a sequência `closed → open → closed`. O último `closed` trava a fechadura imediatamente.
 
 Exemplo de comando para solicitar status:
 
@@ -331,6 +354,9 @@ Exemplo:
   "tamper": false,
   "vibration": false,
   "sessionId": null,
+  "accessPhase": "idle",
+  "unlockElapsedMs": 0,
+  "doorOpenedDuringAccess": false,
   "uptimeMs": 15000
 }
 ```
@@ -345,6 +371,9 @@ Campos principais:
 | `tamper` | Indica violação da caixa |
 | `vibration` | Indica vibração ou impacto |
 | `sessionId` | Sessão de acesso associada, quando houver |
+| `accessPhase` | Fase do acesso: `idle`, `awaiting_open` ou `door_open` |
+| `unlockElapsedMs` | Tempo acumulado desde a liberação da fechadura |
+| `doorOpenedDuringAccess` | Confirma que o MC-38 já abriu na sessão atual |
 | `uptimeMs` | Tempo de execução do ESP32 em milissegundos |
 
 ---
@@ -372,17 +401,37 @@ Exemplo de fechadura liberada:
 }
 ```
 
-Exemplo de travamento automático:
+Exemplo de conclusão e travamento pelo MC-38:
+
+```json
+{
+  "type": "access_completed",
+  "hubId": "HUB-001",
+  "sessionId": "id-da-sessao",
+  "reason": "door_closed_after_open",
+  "accessDurationMs": 30880,
+  "lock": "locked",
+  "door": "closed"
+}
+```
 
 ```json
 {
   "type": "lock_locked",
   "hubId": "HUB-001",
   "sessionId": "id-da-sessao",
-  "reason": "automatic_timeout",
+  "reason": "door_closed_after_open",
   "lock": "locked"
 }
 ```
+
+Enquanto a fechadura está liberada, o monitor serial imprime uma linha por segundo:
+
+```text
+[LOCK] TEMPO LIBERADA 00:00:18 | MC-38: ABERTO | aguardando fechamento
+```
+
+Ao concluir o ciclo, o backend grava a sessão em `data/access-log.jsonl` e a disponibiliza em `GET /api/access-logs` e em `GET /api/state`. O painel mostra o cronômetro ao vivo, o último tempo concluído e o histórico persistente.
 
 Exemplo de porta aberta:
 
@@ -569,9 +618,9 @@ A fechadura deve ser alimentada por uma fonte externa de 12 V.
 - Cada solicitação gera uma sessão de acesso com UUID, data e hora.
 - A fechadura só libera após envio de credenciais válidas e autorização.
 - O ESP32 confirma a liberação antes do dashboard atualizar o estado.
-- Ao final do tempo configurado, a fechadura trava automaticamente.
+- A fechadura permanece liberada até o MC-38 abrir e fechar; o fechamento trava o relé imediatamente.
 - Eventos de porta, tamper e vibração são enviados pelo ESP32 ao backend.
-- O dashboard registra histórico de eventos.
+- O backend persiste a duração de cada acesso e o dashboard exibe cronômetro e histórico.
 - O hub pode ser marcado como online ou offline com base na conexão MQTT.
 - As credenciais reais do broker não ficam no repositório.
 
@@ -605,10 +654,11 @@ Aceite dos termos
 11. Mostre a fechadura sendo liberada.
 12. Acione o sensor de porta.
 13. Mostre o evento de porta aberta no dashboard.
-14. Aguarde o travamento automático.
-15. Acione o tamper ou sensor de vibração.
-16. Mostre o alerta no dashboard.
-17. Explique que a mesma lógica será usada no ESP32 físico.
+14. Feche o sensor MC-38 e mostre o travamento imediato.
+15. Confira a duração no monitor serial e no histórico do dashboard.
+16. Acione o tamper ou sensor de vibração.
+17. Mostre o alerta no dashboard.
+18. Explique que a mesma lógica será usada no ESP32 físico.
 
 ---
 
@@ -630,7 +680,7 @@ Backend deverá rodar em servidor ou nuvem
 ESP32/controladora ficará instalada no hub físico
 Fechadura e sensores serão reais
 Dashboard poderá ser remoto
-Logs deverão ser persistidos em banco de dados
+Logs já são persistidos localmente em JSONL e deverão migrar para banco de dados em escala
 Comunicação deverá usar credenciais seguras por dispositivo
 ```
 
@@ -642,6 +692,12 @@ Comunicação deverá usar credenciais seguras por dispositivo
 - Criação de camada de comunicação com hardware em `src/hardware.js`.
 - Atualização dos estados do hub a partir de mensagens reais do ESP32.
 - Remoção da simulação automática baseada apenas em temporizadores internos.
+- Liberação sem tempo limite até o ciclo completo de abertura e fechamento do MC-38.
+- Travamento imediato no fechamento do MC-38 após a abertura.
+- Cronômetro por segundo no monitor serial e no dashboard.
+- Persistência do tempo de cada acesso em `data/access-log.jsonl`.
+- Histórico de acessos disponível no backend e no painel do operador.
+- Alertas sonoros distintos no PC para tamper, vibração, liberação e travamento da fechadura.
 - Suporte a eventos de fechadura, porta, tamper, vibração e disponibilidade.
 - Tolerância para reconexões rápidas do hub.
 - Preparação para alternar entre ESP32 virtual e ESP32 físico.

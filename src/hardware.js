@@ -162,11 +162,11 @@ function publishCommand(hubId, command) {
   return true;
 }
 
-export function unlockHub(hubId, sessionId, durationMs = 5000) {
+export function unlockHub(hubId, sessionId) {
   return publishCommand(hubId, {
     type: 'unlock',
     sessionId,
-    durationMs,
+    mode: 'until_door_cycle',
   });
 }
 

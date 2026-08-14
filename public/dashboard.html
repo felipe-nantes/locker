@@ -29,6 +29,22 @@
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
           Apresentação
         </a>
+        <button
+          id="sound-toggle"
+          class="btn sound-toggle"
+          type="button"
+          aria-pressed="false"
+          title="Ativar os alertas sonoros deste painel"
+        >
+          <svg class="sound-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M11 5 6 9H2v6h4l5 4V5Z"/>
+            <path class="sound-wave" d="M15.5 8.5a5 5 0 0 1 0 7"/>
+            <path class="sound-wave" d="M18.5 5.5a9 9 0 0 1 0 13"/>
+          </svg>
+          <span id="sound-label">Ativar som</span>
+          <span class="sound-meter" aria-hidden="true"><i></i><i></i><i></i></span>
+        </button>
+        <span id="sound-status" class="sr-only" role="status" aria-live="polite"></span>
         <span id="conn-chip" class="chip offline"><span class="dot"></span><span id="conn-text">Conectando…</span></span>
         <button id="btn-reset-all" class="btn danger" title="Voltar todos os hubs para Fechadura bloqueada">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
@@ -107,9 +123,25 @@
       </section>
     </div>
 
+    <section class="card card-pad access-log-card">
+      <div class="access-log-heading">
+        <div>
+          <span class="eyebrow">Rastreabilidade física</span>
+          <h2 class="section-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            Tempo de liberação por acesso
+          </h2>
+        </div>
+        <span class="access-log-legend"><span class="live-pulse"></span> Persistido pelo backend</span>
+      </div>
+      <div id="access-logs" class="access-log-list">
+        <div class="empty-note">Nenhum ciclo completo registrado ainda.</div>
+      </div>
+    </section>
+
     <p class="footer-note">
-      Nexlock — protótipo demonstrativo. A liberação da fechadura é simulada; a função <code>unlockHub(hubId, sessionId)</code>
-      está isolada para futura integração com controladora IoT (ESP32 / relé / MQTT).
+      Nexlock — controle físico integrado ao ESP32 via MQTT. Cada ciclo registra autorização, abertura e fechamento do MC-38,
+      duração total da liberação e confirmação do travamento.
     </p>
   </div>
 
